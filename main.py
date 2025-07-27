@@ -1,13 +1,6 @@
 """
 A more robust Quantum Art Generator.
 
-Key improvements over the original script:
-1. Clear separation between UI and generation logic.
-2. Graceful fallback to the Python ``random`` module if Qiskit or the Aer backend is unavailable.
-3. Uses a worker thread (``QtCore.QThread``) so the GUI remains responsive while art is generated.
-4. Added type annotations, extensive docstrings, and logging for easier debugging.
-5. The user is prompted with a *save* dialog after the art is generated instead of silently writing into a folder.
-6. Extra command-line interface: run ``python quantum_art_generator.py --cli`` to generate art without a GUI.
 
 Dependencies
 ------------
@@ -175,40 +168,71 @@ def _generate_original(cfg: ArtConfig, draw: ImageDraw.ImageDraw, seed_values: L
             draw.line([(x0, y0), (x1, y1)], fill=color, width=thickness)
 
 
-def _generate_fractal(cfg: ArtConfig, draw: ImageDraw.ImageDraw, seed_values: List[int]):
-    """Simple fractal-like concentric rectangles/ellipses for a fractal vibe."""
+# ---------------------- Fractal & Inkblot generators ----------------------
 
-    center = (cfg.width // 2, cfg.height // 2)
-    max_size = min(cfg.width, cfg.height)
-    layers = 8
-    for i in range(layers):
-        scale = (layers - i) / layers
-        half = int(max_size * scale * 0.5)
-        x0, y0 = center[0] - half, center[1] - half
-        x1, y1 = center[0] + half, center[1] + half
-        color = seed_to_color(seed_values[i % len(seed_values)]) + (180,)
-        if i % 2 == 0:
-            draw.ellipse([x0, y0, x1, y1], outline=color, width=3)
-        else:
-            draw.rectangle([x0, y0, x1, y1], outline=color, width=3)
+import math
+
+def _generate_fractal(cfg: ArtConfig, draw: ImageDraw.ImageDraw, seed_values: List[int]):
+    """Recursive square fractal (Pythagoras tree–like) for higher complexity."""
+
+    max_depth = 5
+
+    def recurse(x: int, y: int, size: int, depth: int, angle: float = 0.0):
+        if depth == 0 or size < 4:
+            return
+
+        idx = depth % len(seed_values)
+        color = seed_to_color(seed_values[idx]) + (200,)
+
+        # compute rectangle corners with optional rotation
+        half = size / 2
+        cx, cy = x + half, y + half
+        points = [(-half, -half), (half, -half), (half, half), (-half, half)]
+        rot = angle
+        rot_points = []
+        for px, py in points:
+            rx = px * math.cos(rot) - py * math.sin(rot)
+            ry = px * math.sin(rot) + py * math.cos(rot)
+            rot_points.append((cx + rx, cy + ry))
+
+        draw.polygon(rot_points, outline=color, width=2)
+
+        # recurse on each corner
+        new_size = int(size * 0.5)
+        for dx, dy in [(-half, -half), (half, -half), (half, half), (-half, half)]:
+            nx = int(cx + dx * 0.5 - new_size / 2)
+            ny = int(cy + dy * 0.5 - new_size / 2)
+            recurse(nx, ny, new_size, depth - 1, rot + (seed_values[idx] % 360) * math.pi / 180)
+
+    recurse(0, 0, min(cfg.width, cfg.height), max_depth)
 
 
 def _generate_inkblot(cfg: ArtConfig, img: Image.Image, draw: ImageDraw.ImageDraw, seed_values: List[int]):
-    """Generate a mirrored black-and-white inkblot (Rorschach-style)."""
+    """Generate a mirrored grayscale inkblot on white background with high complexity."""
 
+    rng = random.Random(seed_values[0])
     half_w = cfg.width // 2
-    for _ in range(cfg.min_shapes + (seed_values[0] % cfg.max_extra_shapes)):
-        w = random.randint(10, half_w)
-        h = random.randint(10, cfg.height // 2)
-        x0 = random.randint(0, half_w - w)
-        y0 = random.randint(0, cfg.height - h)
+    for _ in range(300):  # lots of blotches for complexity
+        shape = rng.choice(["ellipse", "rect", "polygon"])
+        max_size = rng.randint(10, half_w)
+        w = rng.randint(10, max_size)
+        h = rng.randint(10, max_size)
+        x0 = rng.randint(0, half_w - w)
+        y0 = rng.randint(0, cfg.height - h)
         x1 = x0 + w
         y1 = y0 + h
 
-        gray = random.randint(0, 255)
+        gray = rng.randint(0, 200)
         color = (gray, gray, gray, 255)
-        draw.ellipse([x0, y0, x1, y1], fill=color, outline=None)
-        # mirror on x-axis
+
+        if shape == "ellipse":
+            draw.ellipse([x0, y0, x1, y1], fill=color, outline=None)
+        elif shape == "rect":
+            draw.rectangle([x0, y0, x1, y1], fill=color, outline=None)
+        else:  # random polygon
+            points = [(rng.randint(x0, x1), rng.randint(y0, y1)) for _ in range(5)]
+            draw.polygon(points, fill=color)
+
         mirror_box = img.crop((x0, y0, x1, y1)).transpose(Image.FLIP_LEFT_RIGHT)
         img.paste(mirror_box, (cfg.width - x1, y0))
 
@@ -226,8 +250,13 @@ def generate_art(cfg: ArtConfig, output_path: Path | None = None) -> Path:
 
     logger.debug("Seed bits: %s", bitstring)
 
-    # Start with RGBA so we can add semi-transparent shapes
-    img = Image.new("RGBA", (cfg.width, cfg.height), seed_to_color(seed_values[-1]) + (255,))
+    # choose base background depending on style
+    if cfg.style == 2:  # inkblot – pure white background
+        bg_color = (255, 255, 255, 255)
+    else:
+        bg_color = seed_to_color(seed_values[-1]) + (255,)
+
+    img = Image.new("RGBA", (cfg.width, cfg.height), bg_color)
     draw = ImageDraw.Draw(img, "RGBA")
 
     # choose style
